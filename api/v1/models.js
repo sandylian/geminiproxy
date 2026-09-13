@@ -1,6 +1,23 @@
 export const config = { runtime: 'edge' };
 
 export default async function handler(req) {
+  // OPTIONS 预检直接 204
+  if (req.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'authorization, content-type',
+      },
+    });
+  }
+
+  // 只允许 GET
+  if (req.method !== 'GET') {
+    return new Response('method not allowed', { status: 405 });
+  }
+
   const auth = req.headers.get('authorization') || '';
   const key = auth.replace(/^Bearer\s+/i, '').trim();
   if (!key) return new Response('no api key', { status: 401 });
@@ -21,6 +38,11 @@ export default async function handler(req) {
 
   return new Response(JSON.stringify(openaiFormat), {
     status: 200,
-    headers: { 'Content-Type': 'application/json' }
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'authorization, content-type',
+    }
   });
 }
