@@ -1,6 +1,2 @@
-{
-  "type": "module",
-  "scripts": {
-    "test": "node test.mjs"
-  }
-}
+{"type":"module"}
+
