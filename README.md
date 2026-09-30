@@ -52,7 +52,7 @@ print(resp.choices[0].message.content)
 - **透传保真**：content-type 原样透传、请求体二进制安全（视频 `-F` multipart 上传可用）；只有 chat 会在本地校验 `messages` 是否为数组。
 - **错误格式**：本地校验错误（401/400/404/502）返回 OpenAI 标准错误结构；上游错误原样透传。
 - **CORS**：全端点开放，浏览器端可直连；OPTIONS 预检 204 并带 `Access-Control-Max-Age: 86400`。
-- **加新端点**：在 `api/v1/[[...path]].js` 的 `ROUTES` 里加一行即可。
+- **加新端点**：在 `api/_handler.js` 的 `ROUTES` 里加一行；同时为该路径添加一个两行的入口文件（参考 `api/v1/` 下现有文件的写法），双保险路由。
 
 ## 开发
 

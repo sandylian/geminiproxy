@@ -2,7 +2,7 @@
 // 运行：node test.mjs（需要 Node 18+，本机 22 已验证）
 import assert from 'node:assert/strict';
 
-const { default: handler } = await import('./api/v1/[[...path]].js');
+const { default: handler } = await import('./api/_handler.js');
 
 const BASE = 'https://proxy.example.com';
 const UPSTREAM = 'https://generativelanguage.googleapis.com/v1beta/openai';
