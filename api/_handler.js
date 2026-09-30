@@ -165,10 +165,17 @@ export default async function handler(req) {
   // 上游响应原样透传，只补 CORS 头；已知错误附加结构化 code（见 KNOWN_ERROR_CODES）
   const headers = new Headers(upstreamRes.headers);
   for (const [name, value] of Object.entries(CORS)) headers.set(name, value);
+  // Node 运行时下 undici 已自动解压、且 body 可能被缓冲或改写，这三个头必须交由运行时重新计算，
+  // 残留会让客户端拿到空响应或二次解压失败（Edge 会自动修正，Node 不会）。
+  headers.delete('content-length');
+  headers.delete('content-encoding');
+  headers.delete('transfer-encoding');
+
+  const upstreamType = upstreamRes.headers.get('content-type') || '';
 
   // 已知错误标注：仅处理 4xx/5xx 的 JSON 响应；命中时只改 error.code，其余字段一律不动。
-  // 进入此分支意味着错误 body 被缓冲（错误体都很小，可接受）；未命中/解析失败保持原样文本。
-  if (upstreamRes.status >= 400 && (headers.get('content-type') || '').includes('application/json')) {
+  // 错误体很小，缓冲后返回；未命中/解析失败按原文本透传。
+  if (upstreamRes.status >= 400 && upstreamType.includes('application/json')) {
     const raw = await upstreamRes.text();
     let annotated = null;
     try {
@@ -183,10 +190,25 @@ export default async function handler(req) {
     } catch {
       // 非 JSON / 解析失败 → 按原样文本返回
     }
-    headers.delete('content-length');   // body 可能已被改写，长度交给运行时计算
-    headers.delete('content-encoding'); // text() 已解码，避免客户端二次解压
     return new Response(annotated !== null ? annotated : raw, { status: upstreamRes.status, headers });
   }
 
-  return new Response(upstreamRes.body, { status: upstreamRes.status, headers });
+  // SSE（流式对话）：用自建 ReadableStream 逐块泵送——规避 undici 流与运行时流身份不兼容
+  // 导致的空 body 问题（Node 运行时下直接透传上游 .body 曾吐出空响应）。
+  if (upstreamType.includes('text/event-stream') && upstreamRes.body) {
+    const reader = upstreamRes.body.getReader();
+    const stream = new ReadableStream({
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) { controller.close(); return; }
+        controller.enqueue(value);
+      },
+      cancel() { reader.cancel(); },
+    });
+    return new Response(stream, { status: upstreamRes.status, headers });
+  }
+
+  // 其余成功响应（JSON 等，体积小）：缓冲后整体返回，同样规避流身份问题
+  const raw = await upstreamRes.text();
+  return new Response(raw, { status: upstreamRes.status, headers });
 }
