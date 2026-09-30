@@ -65,19 +65,24 @@ function matchRoute(segments) {
   return null;
 }
 
-// chat/completions 唯一的本地校验：messages 必须是数组，提前给出 OpenAI 格式的 400。
-// 其余字段（预填充、reasoning_effort、extra_body.google.* 等）全部原样透传，由 Google 兼容层裁决。
-function validateChatBody(body) {
+// OpenAI 有、而 Google 兼容层不收的字段：实测会 400（Unknown name ... Cannot find field），
+// 转发前剥掉。以后遇到新的 "Unknown name "X"" 报错，把 X 补进这个名单即可。
+const STRIP_FIELDS = ['frequency_penalty', 'presence_penalty', 'logprobs', 'top_logprobs', 'logit_bias'];
+
+// chat/completions 的本地处理：校验 messages 是数组 + 剥掉不兼容字段，其余原样保留
+// （预填充、reasoning_effort、extra_body.google.* 等全部不动，由 Google 兼容层裁决）。
+function sanitizeChatBody(raw) {
   let parsed;
   try {
-    parsed = JSON.parse(new TextDecoder().decode(body));
+    parsed = JSON.parse(new TextDecoder().decode(raw));
   } catch {
-    return openaiError(400, '请求体不是合法 JSON', 'invalid_request_error', 'invalid_json');
+    return { error: openaiError(400, '请求体不是合法 JSON', 'invalid_request_error', 'invalid_json') };
   }
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.messages)) {
-    return openaiError(400, '请求体必须包含 `messages` 数组', 'invalid_request_error', 'missing_messages');
+    return { error: openaiError(400, '请求体必须包含 `messages` 数组', 'invalid_request_error', 'missing_messages') };
   }
-  return null;
+  for (const field of STRIP_FIELDS) delete parsed[field];
+  return { body: JSON.stringify(parsed) };
 }
 
 export default async function handler(req) {
@@ -112,8 +117,9 @@ export default async function handler(req) {
       return openaiError(400, '读取请求体失败', 'invalid_request_error', 'body_read_failed');
     }
     if (match.route.validate) {
-      const invalid = validateChatBody(body);
-      if (invalid) return invalid;
+      const sanitized = sanitizeChatBody(body);
+      if (sanitized.error) return sanitized.error;
+      body = sanitized.body;
     }
   }
 

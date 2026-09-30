@@ -49,7 +49,8 @@ print(resp.choices[0].message.content)
 
 - **思考控制**：`reasoning_effort` 或 `extra_body.google.thinking_config` 原样透传即生效，代理层无需任何处理。
 - **预填充限制**：消息以 assistant 结尾时 Google 返回 400（官方行为），错误原样透传给客户端。
-- **透传保真**：content-type 原样透传、请求体二进制安全（视频 `-F` multipart 上传可用）；只有 chat 会在本地校验 `messages` 是否为数组。
+- **透传保真**：content-type 原样透传、请求体二进制安全（视频 `-F` multipart 上传可用）。
+- **参数清洗**：`frequency_penalty`、`presence_penalty`、`logprobs`、`top_logprobs`、`logit_bias` 五个 OpenAI 字段会被剥掉——实测 Google 兼容层对它们返回 400（Unknown name / Cannot find field）。以后遇到新的 `Unknown name "X"` 报错，把 X 补进 `api/_handler.js` 的 `STRIP_FIELDS` 即可；除这五个字段外，其余（含预填充、`reasoning_effort`、`extra_body.google.*`）全部原样透传。
 - **错误格式**：本地校验错误（401/400/404/502）返回 OpenAI 标准错误结构；上游错误原样透传。
 - **CORS**：全端点开放，浏览器端可直连；OPTIONS 预检 204 并带 `Access-Control-Max-Age: 86400`。
 - **加新端点**：在 `api/_handler.js` 的 `ROUTES` 里加一行；同时为该路径添加一个两行的入口文件（参考 `api/v1/` 下现有文件的写法），双保险路由。

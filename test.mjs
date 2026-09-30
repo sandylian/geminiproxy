@@ -33,6 +33,7 @@ globalThis.fetch = async (url, init) => {
 };
 
 const call = (path, init) => handler(new Request(BASE + path, init));
+const bodyText = (b) => (typeof b === 'string' ? b : decoder.decode(b)); // chat 清洗后是字符串，其余是 ArrayBuffer
 
 let passed = 0;
 async function t(name, fn) {
@@ -48,7 +49,7 @@ async function t(name, fn) {
 
 console.log('路由与透传');
 
-await t('POST /v1/chat/completions → body 字节级透传，头只留 authorization + content-type', async () => {
+await t('POST /v1/chat/completions → 清洗后透传，头只留 authorization + content-type', async () => {
   const body = JSON.stringify({
     model: 'gemini-3.8-flash',
     messages: [{ role: 'user', content: 'hi' }],
@@ -64,9 +65,36 @@ await t('POST /v1/chat/completions → body 字节级透传，头只留 authoriz
   assert.equal(captured.url, `${UPSTREAM}/chat/completions`);
   assert.deepEqual(Object.keys(captured.init.headers).sort(), ['authorization', 'content-type']);
   assert.equal(captured.init.headers.authorization, 'Bearer gk-test');
-  assert.equal(decoder.decode(captured.init.body), body);
+  assert.deepEqual(JSON.parse(bodyText(captured.init.body)), JSON.parse(body));
   assert.equal(res.headers.get('access-control-allow-origin'), '*');
   assert.deepEqual(await res.json(), { ok: true, usage: { total_tokens: 5 } });
+});
+
+await t('POST 含 frequency_penalty 等字段 → 剥离后转发，其余字段保留', async () => {
+  const body = JSON.stringify({
+    model: 'gemini-3.5-flash-lite',
+    messages: [{ role: 'user', content: 'hi' }],
+    frequency_penalty: 0.5,
+    presence_penalty: 0.2,
+    logit_bias: { '50256': -100 },
+    top_logprobs: 3,
+    logprobs: true,
+    reasoning_effort: 'low',
+  });
+  await call('/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test' },
+    body,
+  });
+  const forwarded = JSON.parse(bodyText(captured.init.body));
+  assert.ok(!('frequency_penalty' in forwarded));
+  assert.ok(!('presence_penalty' in forwarded));
+  assert.ok(!('logit_bias' in forwarded));
+  assert.ok(!('top_logprobs' in forwarded));
+  assert.ok(!('logprobs' in forwarded));
+  assert.equal(forwarded.model, 'gemini-3.5-flash-lite');
+  assert.deepEqual(forwarded.messages, [{ role: 'user', content: 'hi' }]);
+  assert.equal(forwarded.reasoning_effort, 'low'); // 兼容层认识的字段原样保留
 });
 
 await t('流式响应透传（SSE body 可读，content-type 保留）', async () => {
