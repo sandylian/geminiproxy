@@ -2,6 +2,8 @@
 // 运行：node test.mjs（需要 Node 18+，本机 22 已验证）
 import assert from 'node:assert/strict';
 
+process.env.UPSTREAM_HEADERS_TIMEOUT_MS = '200'; // 必须在 import 之前：模块顶层会读取该值
+
 const { default: handler } = await import('./api/_handler.js');
 
 const BASE = 'https://proxy.example.com';
@@ -9,12 +11,34 @@ const UPSTREAM = 'https://generativelanguage.googleapis.com/v1beta/openai';
 const decoder = new TextDecoder();
 
 let captured = null;        // 最近一次被截获的上游请求
-let upstreamMode = 'json';  // json | sse | network_error
+let upstreamMode = 'json';  // json | sse | network_error | hang | prefill_error | plain400
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, init) => {
   captured = { url: String(url), init };
   if (upstreamMode === 'network_error') throw new TypeError('fetch failed');
+  if (upstreamMode === 'hang') {
+    // 模拟上游挂起：除非被中止，永不返回；被中止时以 AbortError 拒绝（与真实 fetch 行为一致）
+    return new Promise((_, reject) => {
+      init.signal.addEventListener('abort', () =>
+        reject(new DOMException('The operation was aborted', 'AbortError')));
+    });
+  }
+  if (upstreamMode === 'prefill_error') {
+    return new Response(JSON.stringify({
+      error: {
+        message: 'Please ensure that multiturn requests ends with a user turn or a function response. Requests ending with a model turn are not supported.',
+        type: 'invalid_request_error',
+        param: null,
+        code: null,
+      },
+    }), { status: 400, headers: { 'content-type': 'application/json' } });
+  }
+  if (upstreamMode === 'plain400') {
+    return new Response(JSON.stringify({
+      error: { message: 'some other upstream failure', type: 'invalid_request_error', param: null, code: null },
+    }), { status: 400, headers: { 'content-type': 'application/json' } });
+  }
   if (upstreamMode === 'sse') {
     const enc = new TextEncoder();
     const stream = new ReadableStream({
@@ -264,6 +288,51 @@ await t('上游网络故障 → 502 OpenAI 格式', async () => {
   });
   assert.equal(res.status, 502);
   assert.equal((await res.json()).error.code, 'upstream_unreachable');
+  upstreamMode = 'json';
+});
+
+await t('上游挂起 → 等待响应头超时 504 upstream_timeout', async () => {
+  upstreamMode = 'hang';
+  const res = await call('/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test', 'content-type': 'application/json' },
+    body: '{"messages":[{"role":"user","content":"hi"}]}',
+  });
+  assert.equal(res.status, 504);
+  const { error } = await res.json();
+  assert.equal(error.code, 'upstream_timeout');
+  assert.equal(error.type, 'api_error');
+  upstreamMode = 'json';
+});
+
+await t('上游预填充 400 → 附加结构化 code=prefill_unsupported', async () => {
+  upstreamMode = 'prefill_error';
+  const res = await call('/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test', 'content-type': 'application/json' },
+    body: '{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"pre"}]}',
+  });
+  assert.equal(res.status, 400);
+  const { error } = await res.json();
+  assert.equal(error.code, 'prefill_unsupported');
+  assert.match(error.message, /ending with a model turn/);
+  assert.equal(error.type, 'invalid_request_error'); // 其余字段一律不动
+  assert.equal(error.param, null);
+  upstreamMode = 'json';
+});
+
+await t('上游 400 但非已知错误 → 原样透传，code 未被改动', async () => {
+  upstreamMode = 'plain400';
+  const res = await call('/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test', 'content-type': 'application/json' },
+    body: '{"messages":[{"role":"user","content":"hi"}]}',
+  });
+  assert.equal(res.status, 400);
+  const { error } = await res.json();
+  assert.equal(error.message, 'some other upstream failure');
+  assert.equal(error.code, null);
+  assert.equal(error.param, null);
   upstreamMode = 'json';
 });
 

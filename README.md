@@ -2,8 +2,9 @@
 
 把 Google Gemini API 转成 OpenAI 兼容接口的极简代理（Vercel Edge Functions）。
 
-所有请求**原样透传**到 Google 官方 OpenAI 兼容层 `generativelanguage.googleapis.com/v1beta/openai/`，
-不做格式转换、不清洗参数、不存储任何数据。API Key 由客户端携带，仅用于转发给 Google。
+所有请求透传到 Google 官方 OpenAI 兼容层 `generativelanguage.googleapis.com/v1beta/openai/`
+（chat 的五个不兼容字段除外，见下方参数清洗），不做格式转换、不存储任何数据。
+API Key 由客户端携带，仅用于转发给 Google。
 
 ## 接入
 
@@ -50,8 +51,10 @@ print(resp.choices[0].message.content)
 - **思考控制**：`reasoning_effort` 或 `extra_body.google.thinking_config` 原样透传即生效，代理层无需任何处理。
 - **预填充限制**：消息以 assistant 结尾时 Google 返回 400（官方行为），错误原样透传给客户端。
 - **透传保真**：content-type 原样透传、请求体二进制安全（视频 `-F` multipart 上传可用）。
+- **查询串不转发**：`?key=` 仅用于本地鉴权；除它之外的查询参数一律不转发给上游——这些端点不需要查询参数，且 Google 对未知查询参数是硬报错。
 - **参数清洗**：`frequency_penalty`、`presence_penalty`、`logprobs`、`top_logprobs`、`logit_bias` 五个 OpenAI 字段会被剥掉——实测 Google 兼容层对它们返回 400（Unknown name / Cannot find field）。以后遇到新的 `Unknown name "X"` 报错，把 X 补进 `api/_handler.js` 的 `STRIP_FIELDS` 即可；除这五个字段外，其余（含预填充、`reasoning_effort`、`extra_body.google.*`）全部原样透传。
-- **错误格式**：本地校验错误（401/400/404/502）返回 OpenAI 标准错误结构；上游错误原样透传。
+- **错误格式**：本地校验错误（401/400/404/502/504）返回 OpenAI 标准错误结构；上游错误原样透传，已识别的 Google 限制类错误会附加结构化 `code`（如预填充限制 → `prefill_unsupported`），便于客户端程序化判断，未识别的错误不做任何改动。
+- **上游超时**：等待响应头超过 30 秒返回 504 `upstream_timeout`（可用环境变量 `UPSTREAM_HEADERS_TIMEOUT_MS` 调整毫秒数；Edge 的环境变量在构建时内联，改值需重新部署）。超时只覆盖"等响应头"阶段，不影响已建立的流式响应。
 - **CORS**：全端点开放，浏览器端可直连；OPTIONS 预检 204 并带 `Access-Control-Max-Age: 86400`。
 - **加新端点**：在 `api/_handler.js` 的 `ROUTES` 里加一行；同时为该路径添加一个两行的入口文件（参考 `api/v1/` 下现有文件的写法），双保险路由。
 
