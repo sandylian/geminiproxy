@@ -1,6 +1,6 @@
 # geminiproxy
 
-把 Google Gemini API 转成 OpenAI 兼容接口的极简代理（Vercel Edge Functions）。
+把 Google Gemini API 转成 OpenAI 兼容接口的极简代理（Vercel Functions · Node/Fluid 运行时）。
 
 所有请求透传到 Google 官方 OpenAI 兼容层 `generativelanguage.googleapis.com/v1beta/openai/`
 （chat 的五个不兼容字段除外，见下方参数清洗），不做格式转换、不存储任何数据。
@@ -54,7 +54,8 @@ print(resp.choices[0].message.content)
 - **查询串不转发**：`?key=` 仅用于本地鉴权；除它之外的查询参数一律不转发给上游——这些端点不需要查询参数，且 Google 对未知查询参数是硬报错。
 - **参数清洗**：`frequency_penalty`、`presence_penalty`、`logprobs`、`top_logprobs`、`logit_bias` 五个 OpenAI 字段会被剥掉——实测 Google 兼容层对它们返回 400（Unknown name / Cannot find field）。以后遇到新的 `Unknown name "X"` 报错，把 X 补进 `api/_handler.js` 的 `STRIP_FIELDS` 即可；除这五个字段外，其余（含预填充、`reasoning_effort`、`extra_body.google.*`）全部原样透传。
 - **错误格式**：本地校验错误（401/400/404/502/504）返回 OpenAI 标准错误结构；上游错误原样透传，已识别的 Google 限制类错误会附加结构化 `code`（如预填充限制 → `prefill_unsupported`），便于客户端程序化判断，未识别的错误不做任何改动。
-- **上游超时**：等待响应头超过 30 秒返回 504 `upstream_timeout`（可用环境变量 `UPSTREAM_HEADERS_TIMEOUT_MS` 调整毫秒数；Edge 的环境变量在构建时内联，改值需重新部署）。超时只覆盖"等响应头"阶段，不影响已建立的流式响应。
+- **上游超时（自适应）**：等待响应头阶段——流式 20 秒、非流式 280 秒（非流式的响应头要等生成完才返回，长等待合法）；超时后返回 504 `upstream_timeout`，之后流式透传不受影响。可用环境变量 `STREAM_HEADERS_TIMEOUT_MS` / `NONSTREAM_HEADERS_TIMEOUT_MS` 覆盖；Node 运行时为运行时读取，仪表盘改值即时生效。
+- **运行时与时长**：Node/Fluid Compute，`maxDuration = 300` 秒（Hobby 上限），没有 Edge 的 25 秒初始响应限制——非流式长生成可以跑满 5 分钟。代价是冷启动略慢于 Edge，自用无感。
 - **CORS**：全端点开放，浏览器端可直连；OPTIONS 预检 204 并带 `Access-Control-Max-Age: 86400`。
 - **加新端点**：在 `api/_handler.js` 的 `ROUTES` 里加一行；同时为该路径添加一个两行的入口文件（参考 `api/v1/` 下现有文件的写法），双保险路由。
 
@@ -66,4 +67,4 @@ npm test   # 本地路由测试（不访问网络，Node 18+）
 
 ## 部署
 
-Vercel 项目根目录部署即可（`vercel --prod` 或 Git 推送）。Edge Runtime，流式透传，免费额度内自用绰绰有余。
+Vercel 项目根目录部署即可（`vercel --prod` 或 Git 推送）。Node/Fluid 运行时，`maxDuration` 300 秒，流式透传，免费额度内自用绰绰有余。

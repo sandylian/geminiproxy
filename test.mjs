@@ -2,7 +2,8 @@
 // 运行：node test.mjs（需要 Node 18+，本机 22 已验证）
 import assert from 'node:assert/strict';
 
-process.env.UPSTREAM_HEADERS_TIMEOUT_MS = '200'; // 必须在 import 之前：模块顶层会读取该值
+process.env.STREAM_HEADERS_TIMEOUT_MS = '150';      // 必须在 import 之前：模块顶层会读取
+process.env.NONSTREAM_HEADERS_TIMEOUT_MS = '1200';  // 两档刻意不同值，让"档位选择"可被断言
 
 const { default: handler } = await import('./api/_handler.js');
 
@@ -291,7 +292,7 @@ await t('上游网络故障 → 502 OpenAI 格式', async () => {
   upstreamMode = 'json';
 });
 
-await t('上游挂起 → 等待响应头超时 504 upstream_timeout', async () => {
+await t('上游挂起（非流式）→ 等待响应头超时 504 upstream_timeout', async () => {
   upstreamMode = 'hang';
   const res = await call('/v1/chat/completions', {
     method: 'POST',
@@ -302,6 +303,20 @@ await t('上游挂起 → 等待响应头超时 504 upstream_timeout', async () 
   const { error } = await res.json();
   assert.equal(error.code, 'upstream_timeout');
   assert.equal(error.type, 'api_error');
+  upstreamMode = 'json';
+});
+
+await t('上游挂起（流式）→ 走流式超时档快速 504', async () => {
+  upstreamMode = 'hang';
+  const started = Date.now();
+  const res = await call('/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test', 'content-type': 'application/json' },
+    body: '{"messages":[{"role":"user","content":"hi"}],"stream":true}',
+  });
+  assert.equal(res.status, 504);
+  assert.equal((await res.json()).error.code, 'upstream_timeout');
+  assert.ok(Date.now() - started < 1000, '流式应走 150ms 档，而不是非流式 1200ms 档');
   upstreamMode = 'json';
 });
 

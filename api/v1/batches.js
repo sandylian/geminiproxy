@@ -1,2 +1,2 @@
 export { default } from '../_handler.js';
-export const config = { runtime: 'edge' };
+export const maxDuration = 300;

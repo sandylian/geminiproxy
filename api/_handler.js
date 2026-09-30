@@ -1,14 +1,17 @@
 // 共享处理逻辑：所有 api/v1/** 入口文件 re-export 这个 default。
 // 下划线前缀的文件不会被 Vercel 当作路由，仅作为被导入的模块。
-export const config = { runtime: 'edge' };
+// maxDuration 由各入口文件声明；运行时为 Vercel 默认的 Node（Fluid Compute）。
 
 // Google 官方的 OpenAI 兼容层，请求原样透传，格式转换由 Google 完成。
 // 本函数只负责：路径白名单、密钥提取、chat 最小校验、OpenAI 格式错误、CORS。
 const UPSTREAM = 'https://generativelanguage.googleapis.com/v1beta/openai';
 
-// 等待上游响应头的超时：只覆盖"发请求 → 收到响应头"阶段，响应头到达后 body 的流式透传不受影响。
-// 注意：Vercel Edge 的环境变量在构建时内联，仪表盘改值后需重新部署才会生效。
-const UPSTREAM_HEADERS_TIMEOUT_MS = Number(process.env.UPSTREAM_HEADERS_TIMEOUT_MS) || 30000;
+// 等待上游响应头的超时（只覆盖"发请求 → 收到响应头"阶段，之后流式透传不受影响），按请求形态自适应：
+// - 流式：Google 秒回响应头，20 秒没回就是异常，快速给出干净 504；
+// - 非流式：响应头要等整个回复生成完才返回，长生成合法耗时可达分钟级，给 280 秒（maxDuration 300 内留余量）。
+// Node/Fluid 运行时没有 Edge 的 25 秒初始响应限制；环境变量为运行时读取，仪表盘改值无需重新部署。
+const STREAM_HEADERS_TIMEOUT_MS = Number(process.env.STREAM_HEADERS_TIMEOUT_MS) || 20000;
+const NONSTREAM_HEADERS_TIMEOUT_MS = Number(process.env.NONSTREAM_HEADERS_TIMEOUT_MS) || 280000;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -92,7 +95,7 @@ function sanitizeChatBody(raw) {
     return { error: openaiError(400, '请求体必须包含 `messages` 数组', 'invalid_request_error', 'missing_messages') };
   }
   for (const field of STRIP_FIELDS) delete parsed[field];
-  return { body: JSON.stringify(parsed) };
+  return { body: JSON.stringify(parsed), stream: parsed.stream === true };
 }
 
 export default async function handler(req) {
@@ -120,6 +123,7 @@ export default async function handler(req) {
 
   // 二进制安全透传：multipart（如视频 -F 上传）不经过字符串解码
   let body;
+  let headersTimeoutMs = NONSTREAM_HEADERS_TIMEOUT_MS; // 默认按非流式（长等待合法）；chat 且 stream:true 时改走流式档
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     try {
       body = await req.arrayBuffer();
@@ -130,12 +134,13 @@ export default async function handler(req) {
       const sanitized = sanitizeChatBody(body);
       if (sanitized.error) return sanitized.error;
       body = sanitized.body;
+      if (sanitized.stream) headersTimeoutMs = STREAM_HEADERS_TIMEOUT_MS;
     }
   }
 
   // 超时只覆盖"等待响应头"阶段：收到响应头立即 clearTimeout，之后绝不打断流式透传
   const controller = new AbortController();
-  const headersTimer = setTimeout(() => controller.abort(), UPSTREAM_HEADERS_TIMEOUT_MS);
+  const headersTimer = setTimeout(() => controller.abort(), headersTimeoutMs);
 
   let upstreamRes;
   try {
@@ -150,7 +155,7 @@ export default async function handler(req) {
     });
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
-      return openaiError(504, `请求 Google 上游超时（等待响应头超过 ${UPSTREAM_HEADERS_TIMEOUT_MS / 1000} 秒）`, 'api_error', 'upstream_timeout');
+      return openaiError(504, `请求 Google 上游超时（等待响应头超过 ${Math.round(headersTimeoutMs / 1000)} 秒）`, 'api_error', 'upstream_timeout');
     }
     return openaiError(502, `请求 Google 上游失败：${err instanceof Error ? err.message : String(err)}`, 'api_error', 'upstream_unreachable');
   } finally {
