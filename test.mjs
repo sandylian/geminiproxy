@@ -1,0 +1,252 @@
+// 本地路由测试：不访问网络，替换全局 fetch 截获上游请求做断言。
+// 运行：node test.mjs（需要 Node 18+，本机 22 已验证）
+import assert from 'node:assert/strict';
+
+const { default: handler } = await import('./api/v1/[[...path]].js');
+
+const BASE = 'https://proxy.example.com';
+const UPSTREAM = 'https://generativelanguage.googleapis.com/v1beta/openai';
+const decoder = new TextDecoder();
+
+let captured = null;        // 最近一次被截获的上游请求
+let upstreamMode = 'json';  // json | sse | network_error
+
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (url, init) => {
+  captured = { url: String(url), init };
+  if (upstreamMode === 'network_error') throw new TypeError('fetch failed');
+  if (upstreamMode === 'sse') {
+    const enc = new TextEncoder();
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(enc.encode('data: {"choices":[{"delta":{"content":"你"}}]}\n\n'));
+        c.enqueue(enc.encode('data: [DONE]\n\n'));
+        c.close();
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  }
+  return new Response(JSON.stringify({ ok: true, usage: { total_tokens: 5 } }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+};
+
+const call = (path, init) => handler(new Request(BASE + path, init));
+
+let passed = 0;
+async function t(name, fn) {
+  try {
+    await fn();
+    passed += 1;
+    console.log(`  ✓ ${name}`);
+  } catch (err) {
+    console.error(`  ✗ ${name}`);
+    throw err;
+  }
+}
+
+console.log('路由与透传');
+
+await t('POST /v1/chat/completions → body 字节级透传，头只留 authorization + content-type', async () => {
+  const body = JSON.stringify({
+    model: 'gemini-3.8-flash',
+    messages: [{ role: 'user', content: 'hi' }],
+    reasoning_effort: 'low',
+    extra_body: { extra_body: { google: { thinking_config: { thinking_budget: 512 } } } },
+  });
+  const res = await call('/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test' },
+    body,
+  });
+  assert.equal(res.status, 200);
+  assert.equal(captured.url, `${UPSTREAM}/chat/completions`);
+  assert.deepEqual(Object.keys(captured.init.headers).sort(), ['authorization', 'content-type']);
+  assert.equal(captured.init.headers.authorization, 'Bearer gk-test');
+  assert.equal(decoder.decode(captured.init.body), body);
+  assert.equal(res.headers.get('access-control-allow-origin'), '*');
+  assert.deepEqual(await res.json(), { ok: true, usage: { total_tokens: 5 } });
+});
+
+await t('流式响应透传（SSE body 可读，content-type 保留）', async () => {
+  upstreamMode = 'sse';
+  const res = await call('/api/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test' },
+    body: JSON.stringify({ model: 'gemini-3.8-flash', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+  });
+  assert.equal(res.headers.get('content-type'), 'text/event-stream');
+  assert.match(await res.text(), /\[DONE\]/);
+  upstreamMode = 'json';
+});
+
+await t('GET /v1/models → /v1beta/openai/models', async () => {
+  await call('/v1/models', { method: 'GET', headers: { authorization: 'Bearer gk-test' } });
+  assert.equal(captured.url, `${UPSTREAM}/models`);
+});
+
+await t('GET /v1/models/gemini-2.5-flash → id 原样透传', async () => {
+  await call('/api/v1/models/gemini-2.5-flash', { method: 'GET', headers: { authorization: 'Bearer gk-test' } });
+  assert.equal(captured.url, `${UPSTREAM}/models/gemini-2.5-flash`);
+});
+
+await t('GET /v1/models/foo%20bar → id 编码原样保留（不二次编码）', async () => {
+  await call('/v1/models/foo%20bar', { method: 'GET', headers: { authorization: 'Bearer gk-test' } });
+  assert.equal(captured.url, `${UPSTREAM}/models/foo%20bar`);
+});
+
+await t('GET /v1/models/models/gemini-2.5-flash → models/ 前缀 id round-trip 整段透传', async () => {
+  await call('/v1/models/models/gemini-2.5-flash', { method: 'GET', headers: { authorization: 'Bearer gk-test' } });
+  assert.equal(captured.url, `${UPSTREAM}/models/models/gemini-2.5-flash`);
+});
+
+await t('GET /v1/models/a/b → 任意深度整段透传', async () => {
+  await call('/api/v1/models/a/b', { method: 'GET', headers: { authorization: 'Bearer gk-test' } });
+  assert.equal(captured.url, `${UPSTREAM}/models/a/b`);
+});
+
+await t('POST /v1/embeddings → 透传', async () => {
+  const body = JSON.stringify({ model: 'gemini-embedding-001', input: 'hello' });
+  await call('/v1/embeddings', { method: 'POST', headers: { authorization: 'Bearer gk-test' }, body });
+  assert.equal(captured.url, `${UPSTREAM}/embeddings`);
+  assert.equal(decoder.decode(captured.init.body), body);
+});
+
+await t('POST /v1/images/generations → 透传', async () => {
+  const body = JSON.stringify({ model: 'gemini-2.5-flash-image', prompt: 'a cat', n: 1 });
+  await call('/v1/images/generations', { method: 'POST', headers: { authorization: 'Bearer gk-test' }, body });
+  assert.equal(captured.url, `${UPSTREAM}/images/generations`);
+});
+
+await t('POST /v1/videos → 透传，content-type 原样保留（multipart 可用）', async () => {
+  await call('/v1/videos', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test', 'content-type': 'multipart/form-data; boundary=xyz' },
+    body: '--xyz--',
+  });
+  assert.equal(captured.url, `${UPSTREAM}/videos`);
+  assert.equal(captured.init.headers['content-type'], 'multipart/form-data; boundary=xyz');
+});
+
+await t('POST body 二进制安全（不经字符串解码）', async () => {
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00, 0x0d, 0x0a]);
+  await call('/v1/videos', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test', 'content-type': 'application/octet-stream' },
+    body: bytes,
+  });
+  assert.deepEqual(Array.from(new Uint8Array(captured.init.body)), Array.from(bytes));
+});
+
+await t('GET /v1/videos/op_1 → 视频轮询透传', async () => {
+  await call('/v1/videos/op_1', { method: 'GET', headers: { authorization: 'Bearer gk-test' } });
+  assert.equal(captured.url, `${UPSTREAM}/videos/op_1`);
+});
+
+await t('POST /v1/batches → 透传', async () => {
+  const body = JSON.stringify({ input_file_id: 'file-1', endpoint: '/v1/chat/completions', completion_window: '24h' });
+  await call('/v1/batches', { method: 'POST', headers: { authorization: 'Bearer gk-test' }, body });
+  assert.equal(captured.url, `${UPSTREAM}/batches`);
+});
+
+await t('GET /v1/batches/b_1 → 透传', async () => {
+  await call('/v1/batches/b_1', { method: 'GET', headers: { authorization: 'Bearer gk-test' } });
+  assert.equal(captured.url, `${UPSTREAM}/batches/b_1`);
+});
+
+console.log('鉴权与查询串');
+
+await t('无密钥 → 401 OpenAI 格式错误', async () => {
+  const res = await call('/v1/chat/completions', { method: 'POST', body: '{"messages":[]}' });
+  assert.equal(res.status, 401);
+  const { error } = await res.json();
+  assert.equal(error.code, 'missing_api_key');
+  assert.equal(error.type, 'invalid_request_error');
+});
+
+await t('x-goog-api-key 头也能取到密钥', async () => {
+  await call('/v1/models', { method: 'GET', headers: { 'x-goog-api-key': 'gk-alt' } });
+  assert.equal(captured.init.headers.authorization, 'Bearer gk-alt');
+});
+
+await t('?key= 可用于鉴权；查询串一律不转发（Google 对未知参数硬报错）', async () => {
+  await call('/v1/models?key=gk-query&foo=bar', { method: 'GET' });
+  assert.equal(captured.init.headers.authorization, 'Bearer gk-query');
+  assert.equal(captured.url, `${UPSTREAM}/models`);
+});
+
+console.log('校验与错误');
+
+await t('messages 缺失 → 400，不打上游', async () => {
+  captured = null; // 清掉上一用例的残留请求，才能断言"没打上游"
+  const res = await call('/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test' },
+    body: '{"model":"x"}',
+  });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error.code, 'missing_messages');
+  assert.equal(captured, null);
+});
+
+await t('非法 JSON → 400', async () => {
+  const res = await call('/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test' },
+    body: '{oops',
+  });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error.code, 'invalid_json');
+});
+
+await t('空 messages 数组合法，放行给 Google 裁决', async () => {
+  const res = await call('/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test' },
+    body: '{"messages":[]}',
+  });
+  assert.equal(res.status, 200);
+  assert.equal(captured.url, `${UPSTREAM}/chat/completions`);
+});
+
+await t('未知路径 → 404 OpenAI 格式', async () => {
+  const res = await call('/v1/foo/bar', { method: 'POST' });
+  assert.equal(res.status, 404);
+  assert.equal((await res.json()).error.code, 'not_found');
+});
+
+await t('方法不设白名单：GET chat/completions 也由上游裁决', async () => {
+  const res = await call('/v1/chat/completions', { method: 'GET', headers: { authorization: 'Bearer gk-test' } });
+  assert.equal(res.status, 200);
+  assert.equal(captured.url, `${UPSTREAM}/chat/completions`);
+});
+
+await t('HEAD /v1/models → 透传', async () => {
+  await call('/v1/models', { method: 'HEAD', headers: { authorization: 'Bearer gk-test' } });
+  assert.equal(captured.init.method, 'HEAD');
+});
+
+await t('上游网络故障 → 502 OpenAI 格式', async () => {
+  upstreamMode = 'network_error';
+  const res = await call('/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: 'Bearer gk-test' },
+    body: '{"messages":[{"role":"user","content":"hi"}]}',
+  });
+  assert.equal(res.status, 502);
+  assert.equal((await res.json()).error.code, 'upstream_unreachable');
+  upstreamMode = 'json';
+});
+
+await t('OPTIONS 预检 → 204 + CORS（动词与头均通配）', async () => {
+  const res = await call('/v1/anything', { method: 'OPTIONS' });
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get('access-control-allow-origin'), '*');
+  assert.equal(res.headers.get('access-control-allow-methods'), '*');
+  assert.equal(res.headers.get('access-control-allow-headers'), '*');
+  assert.ok(Number(res.headers.get('access-control-max-age')) >= 86400);
+});
+
+globalThis.fetch = realFetch;
+console.log(`\n全部 ${passed} 项断言通过 ✔`);

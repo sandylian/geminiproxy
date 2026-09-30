@@ -1,4 +1,11 @@
 {
-  "rewrites": [{ "source": "/v1/:path*", "destination": "/api/v1/:path*" }]
+  "rewrites": [
+    { "source": "/v1/:path*", "destination": "/api/v1/:path*" },
+    { "source": "/chat/completions", "destination": "/api/v1/chat/completions" },
+    { "source": "/embeddings", "destination": "/api/v1/embeddings" },
+    { "source": "/images/generations", "destination": "/api/v1/images/generations" },
+    { "source": "/models/:path*", "destination": "/api/v1/models/:path*" },
+    { "source": "/videos/:path*", "destination": "/api/v1/videos/:path*" },
+    { "source": "/batches/:path*", "destination": "/api/v1/batches/:path*" }
+  ]
 }
-
