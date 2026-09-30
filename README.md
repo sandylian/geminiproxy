@@ -57,7 +57,7 @@ print(resp.choices[0].message.content)
 - **上游超时（自适应）**：等待响应头阶段——流式 20 秒、非流式 280 秒（非流式的响应头要等生成完才返回，长等待合法）；超时后返回 504 `upstream_timeout`，之后流式透传不受影响。可用环境变量 `STREAM_HEADERS_TIMEOUT_MS` / `NONSTREAM_HEADERS_TIMEOUT_MS` 覆盖；Node 运行时为运行时读取，仪表盘改值即时生效。
 - **运行时与时长**：Node/Fluid Compute，`maxDuration = 300` 秒（Hobby 上限），没有 Edge 的 25 秒初始响应限制——非流式长生成可以跑满 5 分钟。代价是冷启动略慢于 Edge，自用无感。
 - **CORS**：全端点开放，浏览器端可直连；OPTIONS 预检 204 并带 `Access-Control-Max-Age: 86400`。
-- **加新端点**：在 `api/_handler.js` 的 `ROUTES` 里加一行；同时为该路径添加一个两行的入口文件（参考 `api/v1/` 下现有文件的写法），双保险路由。
+- **加新端点**：在 `api/_handler.js` 的 `ROUTES` 里加一行；同时为该路径添加一个入口文件（内容为三行：`import handler`、`export const maxDuration`、`export default { fetch }`——Node 运行时的入口格式，参考 `api/v1/` 下现有文件），双保险路由。
 
 ## 开发
 
