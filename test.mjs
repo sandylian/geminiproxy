@@ -12,7 +12,7 @@ const UPSTREAM = 'https://generativelanguage.googleapis.com/v1beta/openai';
 const decoder = new TextDecoder();
 
 let captured = null;        // 最近一次被截获的上游请求
-let upstreamMode = 'json';  // json | sse | network_error | hang | prefill_error | plain400
+let upstreamMode = 'json';  // json | sse | network_error | hang | prefill_error | plain400 | binary
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, init) => {
@@ -39,6 +39,13 @@ globalThis.fetch = async (url, init) => {
     return new Response(JSON.stringify({
       error: { message: 'some other upstream failure', type: 'invalid_request_error', param: null, code: null },
     }), { status: 400, headers: { 'content-type': 'application/json' } });
+  }
+  if (upstreamMode === 'binary') {
+    // 非 UTF-8 安全的字节序列：经 text() 解码会被 U+FFFD 污染，arrayBuffer() 则字节级保真
+    return new Response(new Uint8Array([0x00, 0x01, 0xff, 0xfe, 0x80, 0x7f, 0xc0, 0x41]), {
+      status: 200,
+      headers: { 'content-type': 'application/octet-stream' },
+    });
   }
   if (upstreamMode === 'sse') {
     const enc = new TextEncoder();
@@ -348,6 +355,19 @@ await t('上游 400 但非已知错误 → 原样透传，code 未被改动', as
   assert.equal(error.message, 'some other upstream failure');
   assert.equal(error.code, null);
   assert.equal(error.param, null);
+  upstreamMode = 'json';
+});
+
+await t('二进制响应（视频文件下载等）→ 字节级保真', async () => {
+  upstreamMode = 'binary';
+  const res = await call('/api/v1/videos/vid_1/content', {
+    method: 'GET',
+    headers: { authorization: 'Bearer gk-test' },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'application/octet-stream');
+  const bytes = Array.from(new Uint8Array(await res.arrayBuffer()));
+  assert.deepEqual(bytes, [0x00, 0x01, 0xff, 0xfe, 0x80, 0x7f, 0xc0, 0x41]);
   upstreamMode = 'json';
 });
 

@@ -208,7 +208,9 @@ export default async function handler(req) {
     return new Response(stream, { status: upstreamRes.status, headers });
   }
 
-  // 其余成功响应（JSON 等，体积小）：缓冲后整体返回，同样规避流身份问题
-  const raw = await upstreamRes.text();
+  // 其余成功响应（JSON/二进制等）：字节级缓冲后整体返回，同样规避流身份问题。
+  // 必须用 arrayBuffer 而非 text——二进制内容（如 /v1/videos/{id}/content 的 mp4）
+  // 经 UTF-8 解码会把无效字节变成 U+FFFD，客户端下载到损坏文件。
+  const raw = await upstreamRes.arrayBuffer();
   return new Response(raw, { status: upstreamRes.status, headers });
 }

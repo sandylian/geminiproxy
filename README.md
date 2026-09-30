@@ -50,7 +50,7 @@ print(resp.choices[0].message.content)
 
 - **思考控制**：`reasoning_effort` 或 `extra_body.google.thinking_config` 原样透传即生效，代理层无需任何处理。
 - **预填充限制**：消息以 assistant 结尾时 Google 返回 400（官方行为），错误原样透传给客户端。
-- **透传保真**：content-type 原样透传、请求体二进制安全（视频 `-F` multipart 上传可用）。
+- **透传保真**：content-type 原样透传、请求体二进制安全（视频 `-F` multipart 上传可用）、响应体字节级保真（视频文件下载等二进制内容不受损）。
 - **查询串不转发**：`?key=` 仅用于本地鉴权；除它之外的查询参数一律不转发给上游——这些端点不需要查询参数，且 Google 对未知查询参数是硬报错。
 - **参数清洗**：`frequency_penalty`、`presence_penalty`、`logprobs`、`top_logprobs`、`logit_bias` 五个 OpenAI 字段会被剥掉——实测 Google 兼容层对它们返回 400（Unknown name / Cannot find field）。以后遇到新的 `Unknown name "X"` 报错，把 X 补进 `api/_handler.js` 的 `STRIP_FIELDS` 即可；除这五个字段外，其余（含预填充、`reasoning_effort`、`extra_body.google.*`）全部原样透传。
 - **错误格式**：本地校验错误（401/400/404/502/504）返回 OpenAI 标准错误结构；上游错误原样透传，已识别的 Google 限制类错误会附加结构化 `code`（如预填充限制 → `prefill_unsupported`），便于客户端程序化判断，未识别的错误不做任何改动。
